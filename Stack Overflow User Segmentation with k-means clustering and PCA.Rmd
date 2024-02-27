@@ -1,0 +1,409 @@
+---
+title: "Stack Overflow User Segmentation with k-means clustering and PCA"
+author: "Chen Lin"
+date: "2023-07-19"
+output: pdf_document
+
+
+---
+```{r}
+library(corrplot)
+library(lubridate)
+library(readr)
+library(dlookr)
+library(cluster)
+library(grid)
+library(gridExtra)
+library(NbClust)
+library(factoextra)
+library(GGally)
+library(flextable)
+library(ggstatsplot)
+library(tidyverse)
+library(ClusterR)
+library(recipes)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(rpart)
+library(rpart.plot)
+library(FactoMineR)
+library(factoextra)
+```
+
+
+```{r}
+data <- read.csv("~/Desktop/DS4A Women Summer 2023/DS4A Project/Merged Stack Overflow Dataset/final_df_17_21.csv")
+
+#View(data)
+```
+
+
+```{r}
+# Specify the variables to drop
+variables_to_drop <- c("id", "display_name", "location", "about_me", 
+                       "highest_scoring_question", "highest_scoring_answer",
+                       "creation_date", "last_access_date", "_merge", "account_age",
+                       "harmonic_mean", "ques_answer_cnt_avg", "ques_score_avg",
+                      "ques_view_cnt_avg", "ans_score_avg","account_age_days","score_difference",
+                      "ques_median_score", "ans_median_score","X_merge", "year")
+
+# Drop the variables from the dataset
+data <- data[, setdiff(names(data), variables_to_drop)]
+```
+
+
+```{r}
+str(data)
+```
+
+## Data Preparation
+
+#### Missing values
+
+```{r}
+# Check for missing values in each variable
+missing_values <- sapply(data, function(x) sum(is.na(x)))
+
+# Print the number of missing values in each variable
+print(missing_values)
+```
+
+#### Correlations
+
+```{r}
+# Calculate the correlation coefficient
+cor_matrix <- cor(data)
+
+# Print the correlation matrix
+print(cor_matrix)
+```
+
+
+```{r}
+# Specify the variables to drop
+variables_to_drop <- c("ques_answer_cnt_tot", "ques_score", "ans_score", "ques_view_cnt_tot")
+
+# Drop the variables from the dataset
+data <- data[, setdiff(names(data), variables_to_drop)]
+```
+
+
+
+```{r}
+# Check for infinite values
+is_inf <- apply(data, 2, function(x) any(!is.finite(x)))
+inf_vars <- names(is_inf)[is_inf]
+
+# Print variables with infinite values
+print(inf_vars)
+```
+
+
+```{r}
+# Drop harmonic_mean_with_reputation
+data <- subset(data, select = -harmonic_mean_with_reputation)
+summary(data)
+```
+
+```{r}
+str(data)
+```
+
+
+
+#### Outliers
+```{r}
+for (i in colnames(data)){
+  
+low  <- quantile(data[[i]], .01, names = F) # get the 1st percentile for the column
+high <- quantile(data[[i]], .99, names = F) # get the 99th percentile for the column
+
+data[i] [data[i] < low]  <- low  # any row value in the column < 1st percentile replace with the 1st percentile
+data[i] [data[i] > high] <- high # any row value in the column > 99th percentile replace with the 99th percentile
+
+}
+
+summary(data) 
+```
+
+
+#### Scaling
+```{r}
+# Plot the current distributions
+data %>% 
+  pivot_longer(cols = everything()) %>%
+  ggplot(aes(x = name, y = value, fill = name)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+
+```{r}
+# Scale the data
+scaled_data <- recipe(~ ., data = data) %>% 
+  step_YeoJohnson(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  prep() %>%  
+  bake(new_data = NULL)
+
+# Plot the new distributions
+scaled_data %>% 
+  pivot_longer(cols = everything()) %>% 
+  ggplot(aes(x = name, y = value, fill = name)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+## Reduce dimensions with PCA
+
+```{r}
+# Use PCA to reduce the dimensions in our data
+pc <- prcomp(scaled_data, center = FALSE, scale = FALSE)
+summary(pc) # how much variation is explained?
+
+```
+We can see that the first two principal components between them explain 59% of the variance in our data which is pretty good. By having just 3 principal components we can explain 71%.
+
+```{r}
+# Plot the loadings for each factor
+data.frame(pc$rotation) %>% 
+  rownames_to_column(var = "variables") %>% 
+  select(variables:PC3) %>% 
+  pivot_longer(PC1:PC3, names_to = "PC", values_to = "loading") %>% 
+  ggplot(aes(x = variables, y = loading)) +
+  geom_col() + 
+  facet_wrap(vars(PC)) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+  theme(panel.spacing.x = unit(2, "lines"),
+        axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels
+
+```
+
+```{r}
+# Apply PCA to our data
+pca <-
+  recipe(formula = ~ ., data = scaled_data) %>% 
+  step_pca(all_numeric_predictors()) %>% 
+  prep(scaled_data) %>%
+  bake(scaled_data)
+
+# Visualize the relationships in the data   
+ggplot(pca, aes(x=PC1, y=PC2)) + 
+  geom_point(alpha=0.3, color="blue")
+```
+
+
+## Creating clusters with k-means
+
+```{r}
+# Let's go for 3 clusters
+set.seed(123)
+kmeans_clusters <- 
+  kmeans(scaled_data, # our data set
+         	centers = 3, # how many clusters we'd like
+         	nstart = 20, # how many times we repeat the process with different random initialisations
+         	iter.max = 200, # how many iterations to run k-means for
+         	algorithm = "MacQueen") # The default algorithm can struggle with close points
+            
+kmeans_clusters
+```
+
+
+```{r}
+# Compare the averages across the distributions
+kmeans_clusters <- 
+  bind_cols(data, cluster=kmeans_clusters$cluster) # add cluster assignment back to our data
+
+kmeans_clusters %>% 
+  pivot_longer(-cluster) %>% # convert the data from wide to long to work with geom_boxplot
+  ggplot(aes(x = as.factor(cluster), y = value, fill = as.factor(cluster))) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(vars(name), scales = "free") + 
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+
+## Finding the best value of k for our k-means clustering
+
+```{r}
+# Blank object to append within sum of squares error to
+wss <- NULL
+
+# For 1 to 10 cluster centres
+for (i in 1:10) {
+  set.seed(123)
+  kmeans_clusters <- 
+    kmeans(scaled_data, 
+           	centers = i, # just runs the solution for 1-10 clusters
+           	nstart = 20, 
+           	iter.max = 200, 
+           	algorithm = "MacQueen") 
+  
+  # Append the tot sum of squares i.e. compactness of the clusters for each run into our empty object
+  wss <- rbind(wss, tibble("clusters" = i, "WSS" = kmeans_clusters$tot.withinss)) # record WSS and number of clusters
+}
+wss
+```
+
+
+
+```{r}
+# Plot total within sum of squares vs. number of clusters
+ggplot(wss, aes(x=clusters, y=WSS)) +
+  geom_point() + # add dots to the plot
+  geom_line() + # connect the dots with a line
+  scale_x_continuous(breaks= pretty_breaks()) + # tick marks on whole numbers
+  labs(x = "Number of Clusters", y ="Within cluster sum of squares") # add titles to the axes
+```
+
+
+
+```{r}
+# Silhouette Scores (run it on a sample)
+sample <- scaled_data %>% sample_frac(.10)
+
+sample_clusters <- 
+  kmeans(sample, # our data set
+         centers = 4, # how many clusters we'd like
+         nstart = 20, # how many times we repeat the process with different random initialisations
+         iter.max = 200, # how many iterations to run k-means for
+         algorithm = "MacQueen") # The default algorithm can struggle with close points
+
+# Calculate the silhouette score for each observation
+sil_score <- as_tibble(silhouette(sample_clusters$cluster, dist(sample))) # it takes the cluster and the original data
+sil_score
+```
+
+
+
+```{r}
+# Prep data ready for plotting
+sil_score <- 
+  sil_score %>% 
+  arrange(cluster, sil_width) %>% # sort the data
+  group_by(cluster) %>%  
+  mutate(row=row_number(), # add index and colours to help with plotting 
+         colours = case_when(sil_width < 0 ~ "coral1",  # add some manual colour names
+                             sil_width < 0.2 ~ "cornflowerblue",
+                             sil_width > 0.2 ~ "darkolivegreen4"))
+
+# Get the average
+bind_rows(sil_score %>% summarise(avg_sil = mean(sil_width)), 
+          sil_score %>% ungroup() %>% summarise(avg_sil = mean(sil_width)))
+
+# Create the plots
+ggplot(data = sil_score, aes(x=row, y=sil_width, fill = colours)) + 
+  geom_bar(stat="identity") +
+  coord_flip() + 
+  facet_wrap(vars(cluster), scales = "free") + # one lot per cluster
+  scale_fill_identity() + # use the colour names we defined with mutate above
+  theme(text = element_text(size=20)) # make the text bigger
+```
+
+
+```{r}
+# Blank object to append Silhouette Scores to
+sil_score <- NULL
+
+# For 2 to 10 cluster centres on a sample (need 2+ clusters to get a score)
+for (i in 2:10) {
+  set.seed(123)
+  sample_clusters <- 
+    kmeans(sample, # our randomly sampled, smaller data set
+           centers = i,
+           nstart = 20, 
+           iter.max = 200, 
+           algorithm = "MacQueen") 
+  
+  sil_score <- 
+    rbind(sil_score,
+          as_tibble(silhouette(sample_clusters$cluster, dist(sample))) %>% # calculate silhouette scores for each observation
+          summarise(clusters = max(cluster), # keep track of how many clusters are in the solution
+                    avg_silhouette=mean(sil_width))) # get the average silhouette score
+}
+
+# Plot the Silhouette Scores vs. number of clusters. This time higher is better.
+ggplot(sil_score, aes(x=clusters, y=avg_silhouette)) +
+  geom_point() + # add dots to the plot
+  geom_line() + # connect the dots with a line
+  scale_x_continuous(breaks= pretty_breaks()) + # tick marks on whole numbers
+  labs(x = "Number of Clusters", y ="Silhouette Score") # add titles to the axes
+```
+
+
+## Picking a final value of k
+
+```{r}
+# Let's try 4 clusters
+set.seed(123)
+kmeans_clusters <- 
+  kmeans(scaled_data, # our data set
+         centers = 4, # how many clusters we'd like
+         nstart = 20, # how many times we repeat the process with different random initialisations
+         iter.max = 200, # how many iterations to run k-means for
+         algorithm = "MacQueen") # The default algorithm can struggle with close points
+
+# Compare the averages across the distributions
+clustered_data <- 
+  bind_cols(data, cluster=kmeans_clusters$cluster) # add cluster assignment back to our data
+
+clustered_data %>% 
+  pivot_longer(-cluster) %>%
+  ggplot(aes(x = as.factor(cluster), y = value, fill = as.factor(cluster))) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(vars(name), scales = "free") + 
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+```{r}
+# Compare the averages across the distributions
+clustered_scaled_data <- 
+  bind_cols(scaled_data, cluster=kmeans_clusters$cluster) # add cluster assignment back to our data
+
+clustered_scaled_data %>% 
+  pivot_longer(-cluster) %>%
+  ggplot(aes(x = name, y = value, fill = name)) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(vars(cluster), scales = "free") + 
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+
+
+```{r}
+# How big are the clusters?
+clustered_data %>% 
+  group_by(cluster) %>% 
+  summarise(num_users = n()) %>% 
+  mutate(pct_users = num_users / sum(num_users))
+```
+
+
+```{r}
+# Visualize the relationships in the data   
+pca_with_clusters <- 
+  bind_cols(pca, cluster=kmeans_clusters$cluster) # add the clusters onto our PCA'd data so we can plot them
+
+ggplot(pca_with_clusters, aes(x = PC1, y = PC2, color = as.factor(cluster))) + 
+  geom_point(alpha = 0.3, show.legend = FALSE)
+```
+
+
+### Running k-means after PCA
+```{r}
+# Create a 4 cluster solution with PC1-3 as inputs
+set.seed(123)
+pca_clusters <- 
+  kmeans(pca %>% select(PC1:PC3), # our post-PCA data set
+         	centers = 4, # how many clusters we'd like
+         	nstart = 20, # how many times we repeat the process with different random initialisations
+         	iter.max = 200, # how many iterations to run k-means for
+         	algorithm = "MacQueen") # The default algorithm can struggle with close points
+
+# Plot the results
+pca_with_clusters <- bind_cols(pca_with_clusters, pca_cluster=pca_clusters$cluster)
+ggplot(pca_with_clusters, aes(x = PC1, y = PC2, color = as.factor(pca_cluster))) + 
+  geom_point(alpha = 0.3, show.legend = T)
+```
+
